@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import time
+from typing import Optional
 
 import pytz
 
@@ -14,13 +15,14 @@ from .strategy import BreakoutStrategy
 from .backtest import Backtester
 
 
-def do_auth_flow() -> None:
+def do_auth_flow(auth_code: Optional[str]) -> None:
 	auth = UpstoxAuth()
-	url = auth.get_login_url()
-	print("Open this URL, log in, and capture the 'code' from redirect:")
-	print(url)
-	code = input("Paste code here: ").strip()
-	bundle = auth.exchange_code_for_token(code)
+	if not auth_code:
+		url = auth.get_login_url()
+		print("Open this URL, log in, then rerun with --auth-code=<code>:")
+		print(url)
+		return
+	bundle = auth.exchange_code_for_token(auth_code)
 	print("Access token saved. Expires in:", bundle.expires_in)
 
 
@@ -89,7 +91,8 @@ def run_backtest(months: int | None, from_date: str | None, to_date: str | None)
 
 def main() -> None:
 	parser = argparse.ArgumentParser(description="NIFTY 14:40 breakout bot")
-	parser.add_argument("--auth", action="store_true", help="Run first-time auth flow")
+	parser.add_argument("--auth", action="store_true", help="Run auth flow. If --auth-code omitted, prints login URL")
+	parser.add_argument("--auth-code", default=None, help="Authorization code from redirect URL")
 	parser.add_argument("--no-trade", action="store_true", help="Do not place orders, only compute levels")
 	parser.add_argument("--backtest", action="store_true", help="Run backtest instead of live mode")
 	parser.add_argument("--months", type=int, default=None, help="Backtest last N months")
@@ -98,7 +101,7 @@ def main() -> None:
 	args = parser.parse_args()
 
 	if args.auth:
-		do_auth_flow()
+		do_auth_flow(args.auth_code)
 		return
 
 	if args.backtest:

@@ -1,9 +1,12 @@
 import os
 from dataclasses import dataclass
-from dotenv import load_dotenv
 
-
-load_dotenv()
+try:
+	from dotenv import load_dotenv  # type: ignore
+	load_dotenv()
+except Exception:
+	# If python-dotenv is not installed, proceed without auto-loading .env
+	pass
 
 
 @dataclass
