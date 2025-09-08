@@ -1,0 +1,8 @@
+python-dotenv==1.0.1
+pytz==2024.1
+requests==2.32.3
+websocket-client==1.8.0
+schedule==1.2.1
+pandas==2.2.2
+numpy==2.1.1
+upstox-client==2.6.0
