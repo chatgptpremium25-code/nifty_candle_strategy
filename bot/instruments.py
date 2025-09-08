@@ -82,3 +82,19 @@ class InstrumentResolver:
 				elif opt_type == "PE":
 					pe_key = inst.get("instrument_key")
 		return ce_key, pe_key
+
+	def get_instrument_by_key(self, key: str) -> Optional[Dict[str, Any]]:
+		instruments = self.get_all()
+		for inst in instruments:
+			if inst.get("instrument_key") == key:
+				return inst
+		return None
+
+	def get_lot_size(self, key: str) -> int:
+		inst = self.get_instrument_by_key(key)
+		if not inst:
+			return 1
+		try:
+			return int(inst.get("lot_size") or inst.get("lot_size_qty") or 1)
+		except Exception:
+			return 1
