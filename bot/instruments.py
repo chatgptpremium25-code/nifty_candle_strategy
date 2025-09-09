@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,18 +42,14 @@ class InstrumentResolver:
 		return data
 
 	def find_nifty_index_key(self) -> Optional[str]:
-		instruments = self.get_all()
-		for inst in instruments:
-			if inst.get("exchange") in ("NSE_INDEX", "NSE") and str(inst.get("tradingsymbol", "")).upper() in ("NIFTY 50", "NIFTY50", "NIFTY_50"):
-				return inst.get("instrument_key")
-		return None
+		# Use known index key provided by user/environment; fallback to standard label
+		return os.getenv("NIFTY_INDEX_KEY", "NSE_INDEX|Nifty 50")
 
-	def _current_weekly_expiry(self, now_ist: dt.datetime) -> dt.date:
-		# NIFTY weekly expiry is Thursday (or previous working day for holidays). We assume Thursday here; production should adjust for holidays.
-		weekday = now_ist.weekday()  # Monday=0 ... Sunday=6
-		delta = (3 - weekday) % 7  # Thursday index 3
-		expiry_date = (now_ist + dt.timedelta(days=delta)).date()
-		return expiry_date
+	def _current_weekly_expiry(self, now_ist: dt.datetime) -> Optional[str]:
+		# Return YYYY-MM-DD for Thursday this week
+		weekday = now_ist.weekday()
+		delta = (3 - weekday) % 7
+		return (now_ist + dt.timedelta(days=delta)).date().isoformat()
 
 	def _round_to_nearest_50(self, price: float) -> int:
 		return int(round(price / 50.0) * 50)
@@ -60,27 +57,27 @@ class InstrumentResolver:
 	def find_atm_option_keys(self, underlying_ltp: float, now_ist: Optional[dt.datetime] = None) -> Tuple[Optional[str], Optional[str]]:
 		if now_ist is None:
 			now_ist = dt.datetime.now(tz=IST)
+		under_key = self.find_nifty_index_key()
 		expiry = self._current_weekly_expiry(now_ist)
-		strike = self._round_to_nearest_50(underlying_ltp)
-		instruments = self.get_all()
+		chain = self.client.get_option_chain(under_key, expiry)
+		if not chain:
+			return None, None
+		atm = self._round_to_nearest_50(underlying_ltp)
+		best_diff = 10**9
 		ce_key = None
 		pe_key = None
-		for inst in instruments:
-			if inst.get("segment") == "NFO-OPT" and str(inst.get("name", "")).upper().startswith("NIFTY"):
-				inst_exp = inst.get("expiry")  # e.g., 2025-09-25
-				try:
-					inst_exp_date = dt.datetime.strptime(inst_exp, "%Y-%m-%d").date()
-				except Exception:
-					continue
-				if inst_exp_date != expiry:
-					continue
-				if int(float(inst.get("strike_price", 0))) != strike:
-					continue
-				opt_type = str(inst.get("option_type", "")).upper()
-				if opt_type == "CE":
-					ce_key = inst.get("instrument_key")
-				elif opt_type == "PE":
-					pe_key = inst.get("instrument_key")
+		for row in chain:
+			try:
+				strike = int(float(row.get("strike_price")))
+			except Exception:
+				continue
+			diff = abs(strike - atm)
+			if diff < best_diff:
+				best_diff = diff
+				co = row.get("call_options") or {}
+				po = row.get("put_options") or {}
+				ce_key = co.get("instrument_key")
+				pe_key = po.get("instrument_key")
 		return ce_key, pe_key
 
 	def get_instrument_by_key(self, key: str) -> Optional[Dict[str, Any]]:
@@ -91,10 +88,7 @@ class InstrumentResolver:
 		return None
 
 	def get_lot_size(self, key: str) -> int:
-		inst = self.get_instrument_by_key(key)
-		if not inst:
-			return 1
 		try:
-			return int(inst.get("lot_size") or inst.get("lot_size_qty") or 1)
+			return int(os.getenv("NIFTY_OPTION_LOT_SIZE", "50"))
 		except Exception:
-			return 1
+			return 50

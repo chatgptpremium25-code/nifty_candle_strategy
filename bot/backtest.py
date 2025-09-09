@@ -4,6 +4,7 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import time
 import pytz
 
 from .instruments import InstrumentResolver, IST
@@ -29,50 +30,78 @@ class Backtester:
 		self.client = client
 		self.resolver = resolver
 		self.stop_loss_rupees = stop_loss_rupees
+		self._month_cache: Dict[Tuple[str, int, int], List[List[Any]]] = {}
 
-	def _parse_dt(self, ts: Any) -> Optional[dt.datetime]:
+	def _parse_any_ts(self, v: Any) -> dt.datetime:
+		if isinstance(v, (int, float)):
+			return dt.datetime.fromtimestamp(float(v) / 1000.0, tz=IST)
 		try:
-			c_dt = dt.datetime.fromisoformat(str(ts))
-			if c_dt.tzinfo is None:
-				c_dt = c_dt.replace(tzinfo=IST)
-			return c_dt
+			iv = int(v)
+			return dt.datetime.fromtimestamp(iv / 1000.0, tz=IST)
 		except Exception:
-			return None
+			pass
+		d = dt.datetime.fromisoformat(str(v))
+		if d.tzinfo is None:
+			d = d.replace(tzinfo=IST)
+		return d
 
 	def _candles_map(self, candles: List[List[Any]]) -> Dict[dt.datetime, List[Any]]:
 		m: Dict[dt.datetime, List[Any]] = {}
 		for c in candles:
-			c_dt = self._parse_dt(c[0])
-			if not c_dt:
-				continue
+			c_dt = self._parse_any_ts(c[0])
 			m[c_dt] = c
 		return m
 
-	def _find_reference_levels(self, nifty_key: str, day: dt.date) -> Optional[BreakoutLevels]:
-		start = dt.datetime.combine(day, dt.time(9, 15), tzinfo=IST)
-		end = dt.datetime.combine(day, dt.time(15, 30), tzinfo=IST)
-		candles = self.client.get_historical_candles(nifty_key, "5minute", start, end)
-		target_dt = dt.datetime.combine(day, dt.time(14, 40), tzinfo=IST)
-		for c in candles:
-			c_dt = self._parse_dt(c[0])
-			if c_dt == target_dt:
-				return BreakoutLevels(ref_time=target_dt, high=float(c[2]), low=float(c[3]))
-		return None
+	def _get_month_bounds(self, d: dt.date) -> Tuple[dt.date, dt.date]:
+		start = d.replace(day=1)
+		if start.month == 12:
+			end = start.replace(year=start.year + 1, month=1, day=1) - dt.timedelta(days=1)
+		else:
+			end = start.replace(month=start.month + 1, day=1) - dt.timedelta(days=1)
+		return start, end
 
-	def _first_breakout(self, nifty_map: Dict[dt.datetime, List[Any]], levels: BreakoutLevels) -> Optional[Tuple[str, dt.datetime]]:
-		# Start 14:45 up to 15:10
+	def _fetch_month_v3_cached(self, instrument_key: str, day: dt.date) -> List[List[Any]]:
+		key = (instrument_key, day.year, day.month)
+		if key in self._month_cache:
+			return self._month_cache[key]
+		start, end = self._get_month_bounds(day)
+		candles = self.client.get_historical_candles_v3(instrument_key, "minutes", 5, start, end)
+		# brief throttle to avoid rate limits
+		time.sleep(0.2)
+		self._month_cache[key] = candles
+		return candles
+
+	def _find_candle_by_hm(self, candles: List[List[Any]], day: dt.date, hour: int, minute: int) -> Optional[List[Any]]:
+		target = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=IST)
+		best = None
+		for c in candles:
+			c_dt = self._parse_any_ts(c[0])
+			if c_dt.date() == day and c_dt.hour == hour and c_dt.minute == minute:
+				best = c
+				break
+		return best
+
+	def _find_reference_levels(self, nifty_key: str, day: dt.date) -> Optional[BreakoutLevels]:
+		candles = self._fetch_month_v3_cached(nifty_key, day)
+		c = self._find_candle_by_hm(candles, day, 14, 40)
+		if not c:
+			return None
+		return BreakoutLevels(ref_time=dt.datetime.combine(day, dt.time(14, 40), tzinfo=IST), high=float(c[2]), low=float(c[3]))
+
+	def _first_breakout(self, nifty_map: Dict[dt.datetime, List[Any]], levels: BreakoutLevels) -> Optional[Tuple[str, dt.datetime, float]]:
 		start_dt = dt.datetime.combine(levels.ref_time.date(), dt.time(14, 45), tzinfo=IST)
 		end_dt = dt.datetime.combine(levels.ref_time.date(), dt.time(15, 10), tzinfo=IST)
 		t = start_dt
 		while t <= end_dt:
-			c = nifty_map.get(t)
-			if c:
-				high = float(c[2])
-				low = float(c[3])
+			cand = nifty_map.get(t) or nifty_map.get(t + dt.timedelta(minutes=5)) or nifty_map.get(t - dt.timedelta(minutes=5))
+			if cand:
+				high = float(cand[2])
+				low = float(cand[3])
+				close = float(cand[4])
 				if high > levels.high:
-					return ("CE", t)
+					return ("CE", t, close)
 				if low < levels.low:
-					return ("PE", t)
+					return ("PE", t, close)
 			t += dt.timedelta(minutes=5)
 		return None
 
@@ -81,32 +110,20 @@ class Backtester:
 		opt_key = ce_key if direction == "CE" else pe_key
 		if not opt_key:
 			return None
-		lot = self.resolver.get_lot_size(opt_key)
-		start = dt.datetime.combine(day, dt.time(9, 15), tzinfo=IST)
-		end = dt.datetime.combine(day, dt.time(15, 30), tzinfo=IST)
-		candles = self.client.get_historical_candles(opt_key, "5minute", start, end)
+		qty = self.resolver.get_lot_size(opt_key)
+		candles = self._fetch_month_v3_cached(opt_key, day)
 		omap = self._candles_map(candles)
-		entry_c = omap.get(entry_time)
-		if not entry_c:
-			# if exact timestamp missing, try next bar
-			entry_c = omap.get(entry_time + dt.timedelta(minutes=5))
-			entry_time = entry_time + dt.timedelta(minutes=5) if entry_c else entry_time
+		entry_c = omap.get(entry_time) or omap.get(entry_time + dt.timedelta(minutes=5)) or omap.get(entry_time - dt.timedelta(minutes=5))
 		if not entry_c:
 			return None
-		entry_price = float(entry_c[1])  # open of the bar
-		# iterate forward for SL or EOD ~15:25
+		entry_price = float(entry_c[1])
 		deadline = dt.datetime.combine(day, dt.time(15, 25), tzinfo=IST)
 		t = entry_time
-		opt_mult = 1.0
-		qty = lot if lot > 0 else 1
 		while t <= deadline:
-			c = omap.get(t)
+			c = omap.get(t) or omap.get(t + dt.timedelta(minutes=5))
 			if c:
-				high = float(c[2])
 				low = float(c[3])
-				# For long option, SL if bar low drops enough below entry
-				pnl_low = (low - entry_price) * qty
-				if pnl_low <= -abs(self.stop_loss_rupees):
+				if (low - entry_price) * qty <= -abs(self.stop_loss_rupees):
 					return TradeResult(
 						trade_date=day,
 						direction=direction,
@@ -119,7 +136,6 @@ class Backtester:
 						reason="SL",
 					)
 			t += dt.timedelta(minutes=5)
-		# EOD exit at 15:25 bar close (or last available close <= deadline)
 		last_bar = omap.get(deadline) or omap.get(deadline - dt.timedelta(minutes=5)) or entry_c
 		exit_price = float(last_bar[4])
 		return TradeResult(
@@ -137,25 +153,20 @@ class Backtester:
 	def run(self, start_date: dt.date, end_date: dt.date) -> List[TradeResult]:
 		results: List[TradeResult] = []
 		nifty_key = self.resolver.find_nifty_index_key()
-		if not nifty_key:
-			raise RuntimeError("Could not resolve NIFTY index instrument key")
 		day = start_date
 		while day <= end_date:
+			candles = self._fetch_month_v3_cached(nifty_key, day)
+			nmap = self._candles_map(candles)
 			levels = self._find_reference_levels(nifty_key, day)
 			if not levels:
 				day += dt.timedelta(days=1)
 				continue
-			# Map underlying candles
-			u_candles = self.client.get_historical_candles(nifty_key, "5minute", dt.datetime.combine(day, dt.time(9, 15), tzinfo=IST), dt.datetime.combine(day, dt.time(15, 30), tzinfo=IST))
-			nmap = self._candles_map(u_candles)
 			br = self._first_breakout(nmap, levels)
 			if not br:
 				day += dt.timedelta(days=1)
 				continue
-			dirn, entry_time = br
-			entry_under_c = nmap.get(entry_time)
-			under_entry_price = float(entry_under_c[4]) if entry_under_c else levels.high if dirn == "CE" else levels.low
-			tr = self._option_entry_exit(dirn, entry_time, under_entry_price, day)
+			dirn, entry_time, under_close = br
+			tr = self._option_entry_exit(dirn, entry_time, under_close, day)
 			if tr:
 				results.append(tr)
 			day += dt.timedelta(days=1)
