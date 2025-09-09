@@ -92,3 +92,37 @@ class InstrumentResolver:
 			return int(os.getenv("NIFTY_OPTION_LOT_SIZE", "50"))
 		except Exception:
 			return 50
+
+	def find_affordable_option_key(self, underlying_ltp: float, side: str, budget_rupees: float, now_ist: Optional[dt.datetime] = None) -> Optional[str]:
+		if now_ist is None:
+			now_ist = dt.datetime.now(tz=IST)
+		under_key = self.find_nifty_index_key()
+		expiry = self._current_weekly_expiry(now_ist)
+		chain = self.client.get_option_chain(under_key, expiry)
+		if not chain:
+			return None
+		atm = self._round_to_nearest_50(underlying_ltp)
+		lot = self.get_lot_size("NIFTY")
+		# Sort strikes by proximity to ATM
+		def strike_val(r: Dict[str, Any]) -> int:
+			try:
+				return int(float(r.get("strike_price")))
+			except Exception:
+				return 10**9
+		rows = sorted(chain, key=lambda r: abs(strike_val(r) - atm))
+		for row in rows:
+			strike = strike_val(row)
+			if strike == 10**9:
+				continue
+			leg = (row.get("call_options") if side.lower() == "ce" else row.get("put_options")) or {}
+			ik = leg.get("instrument_key")
+			if not ik:
+				continue
+			try:
+				ltp = self.client.get_ltp(ik)
+			except Exception:
+				continue
+			cost = ltp * lot
+			if cost <= budget_rupees:
+				return ik
+		return None

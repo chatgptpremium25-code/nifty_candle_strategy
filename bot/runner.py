@@ -117,6 +117,81 @@ def place_order_now(instrument_key: Optional[str], atm_ce: bool, atm_pe: bool, q
 	print("Order placed:", resp)
 
 
+def run_one_pm_breakout(budget_rupees: float = 600.0, stop_loss_rupees: float = 100.0) -> None:
+	auth = UpstoxAuth()
+	client = UpstoxClient(auth)
+	resolver = InstrumentResolver(client)
+	nifty_key = resolver.find_nifty_index_key()
+	# Get 13:00 candle high/low
+	today = dt.datetime.now(tz=IST).date()
+	from bot.backtest import Backtester  # reuse fetch helpers via client directly
+	# Fetch NIFTY 5m candles for today via v3
+	month_start = today.replace(day=1)
+	candles = client.get_historical_candles_v3(nifty_key, "minutes", 5, month_start, today)
+	# Find 13:00 bar
+	ref_high = None
+	ref_low = None
+	for c in candles:
+		# [ts, o, h, l, c, v]
+		try:
+			c_dt = dt.datetime.fromisoformat(str(c[0]))
+			if c_dt.tzinfo is None:
+				c_dt = c_dt.replace(tzinfo=IST)
+		except Exception:
+			# epoch ms
+			c_dt = dt.datetime.fromtimestamp(int(c[0]) / 1000.0, tz=IST)
+		if c_dt.date() == today and c_dt.hour == 13 and c_dt.minute == 0:
+			ref_high = float(c[2])
+			ref_low = float(c[3])
+			break
+	if ref_high is None or ref_low is None:
+		raise RuntimeError("Could not find 13:00 candle today")
+	print(f"1:00 PM levels: High={ref_high} Low={ref_low}")
+	# Wait for breakout
+	deadline = dt.datetime.combine(today, dt.time(15, 10), tzinfo=IST)
+	entered = False
+	pos_key = None
+	pos_qty = 0
+	entry_price = 0.0
+	while dt.datetime.now(tz=IST) < deadline and not entered:
+		ltp = client.get_ltp(nifty_key)
+		if ltp > ref_high:
+			# take CE within budget
+			opt_key = resolver.find_affordable_option_key(ltp, side="ce", budget_rupees=budget_rupees)
+			if opt_key:
+				qty = 1  # buy 1 unit; budget already used for affordability via lot cost check
+				resp = client.place_order(opt_key, side="buy", quantity=qty, product="MIS", variety="REGULAR", order_type="MARKET")
+				pos_key = opt_key
+				pos_qty = qty
+				entry_price = client.get_ltp(opt_key)
+				entered = True
+				print("Entered CE")
+		elif ltp < ref_low:
+			opt_key = resolver.find_affordable_option_key(ltp, side="pe", budget_rupees=budget_rupees)
+			if opt_key:
+				qty = 1
+				resp = client.place_order(opt_key, side="buy", quantity=qty, product="MIS", variety="REGULAR", order_type="MARKET")
+				pos_key = opt_key
+				pos_qty = qty
+				entry_price = client.get_ltp(opt_key)
+				entered = True
+				print("Entered PE")
+		time.sleep(0.5)
+	if not entered:
+		print("No breakout until deadline.")
+		return
+	# Enforce ₹100 SL
+	while dt.datetime.now(tz=IST) < dt.datetime.combine(today, dt.time(15, 25), tzinfo=IST):
+		ltp = client.get_ltp(pos_key)
+		pnl = (ltp - entry_price) * pos_qty
+		if pnl <= -abs(stop_loss_rupees):
+			client.place_order(pos_key, side="sell", quantity=pos_qty, product="MIS", variety="REGULAR", order_type="MARKET")
+			print("Stop loss hit. Exited.")
+			return
+		time.sleep(1)
+	print("Square-off time reached.")
+
+
 def main() -> None:
 	parser = argparse.ArgumentParser(description="NIFTY 14:40 breakout bot")
 	parser.add_argument("--auth", action="store_true", help="Run auth flow. If --auth-code omitted, prints login URL")
@@ -131,6 +206,7 @@ def main() -> None:
 	parser.add_argument("--atm-ce", action="store_true", help="Auto-resolve and buy NIFTY ATM CE")
 	parser.add_argument("--atm-pe", action="store_true", help="Auto-resolve and buy NIFTY ATM PE")
 	parser.add_argument("--qty", type=int, default=None, help="Quantity to buy (defaults to lot size)")
+	parser.add_argument("--one-pm-breakout", action="store_true", help="Run 1:00 PM breakout with small budget and SL")
 	args = parser.parse_args()
 
 	if args.auth:
@@ -143,6 +219,10 @@ def main() -> None:
 
 	if args.place_order:
 		place_order_now(args.instrument_key, args.atm_ce, args.atm_pe, args.qty)
+		return
+
+	if args.one_pm_breakout:
+		run_one_pm_breakout(budget_rupees=600.0, stop_loss_rupees=100.0)
 		return
 
 	run_daily(trade_today=not args.no_trade, enforce_sl=True)
