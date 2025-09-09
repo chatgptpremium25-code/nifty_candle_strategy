@@ -89,6 +89,34 @@ def run_backtest(months: int | None, from_date: str | None, to_date: str | None)
 		)
 
 
+def place_order_now(instrument_key: Optional[str], atm_ce: bool, atm_pe: bool, qty: Optional[int]) -> None:
+	settings = get_settings()
+	auth = UpstoxAuth()
+	client = UpstoxClient(auth)
+	resolver = InstrumentResolver(client)
+	if not instrument_key:
+		nifty_key = resolver.find_nifty_index_key()
+		ltp = client.get_ltp(nifty_key)
+		ce_key, pe_key = resolver.find_atm_option_keys(ltp)
+		if atm_ce:
+			instrument_key = ce_key
+		elif atm_pe:
+			instrument_key = pe_key
+		if not instrument_key:
+			raise RuntimeError("Could not resolve ATM option instrument key")
+	if qty is None or qty <= 0:
+		qty = resolver.get_lot_size(instrument_key)
+	resp = client.place_order(
+		instrument_key=instrument_key,
+		side="buy",
+		quantity=qty,
+		product=settings.order_product,
+		variety=settings.order_variety,
+		order_type="MARKET",
+	)
+	print("Order placed:", resp)
+
+
 def main() -> None:
 	parser = argparse.ArgumentParser(description="NIFTY 14:40 breakout bot")
 	parser.add_argument("--auth", action="store_true", help="Run auth flow. If --auth-code omitted, prints login URL")
@@ -98,6 +126,11 @@ def main() -> None:
 	parser.add_argument("--months", type=int, default=None, help="Backtest last N months")
 	parser.add_argument("--from", dest="from_date", default=None, help="Backtest start date YYYY-MM-DD")
 	parser.add_argument("--to", dest="to_date", default=None, help="Backtest end date YYYY-MM-DD")
+	parser.add_argument("--place-order", action="store_true", help="Place an immediate order")
+	parser.add_argument("--instrument-key", dest="instrument_key", default=None, help="Instrument key to buy")
+	parser.add_argument("--atm-ce", action="store_true", help="Auto-resolve and buy NIFTY ATM CE")
+	parser.add_argument("--atm-pe", action="store_true", help="Auto-resolve and buy NIFTY ATM PE")
+	parser.add_argument("--qty", type=int, default=None, help="Quantity to buy (defaults to lot size)")
 	args = parser.parse_args()
 
 	if args.auth:
@@ -106,6 +139,10 @@ def main() -> None:
 
 	if args.backtest:
 		run_backtest(args.months, args.from_date, args.to_date)
+		return
+
+	if args.place_order:
+		place_order_now(args.instrument_key, args.atm_ce, args.atm_pe, args.qty)
 		return
 
 	run_daily(trade_today=not args.no_trade, enforce_sl=True)
