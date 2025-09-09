@@ -1,0 +1,8 @@
+.env
+*.pyc
+__pycache__/
+tokens.json
+instruments_cache.json
+.DS_Store
+.venv/
+.env.local
