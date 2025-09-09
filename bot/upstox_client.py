@@ -14,21 +14,30 @@ class UpstoxClient:
 		self.session = auth.get_authorized_session()
 
 	def get_instruments_master(self) -> List[Dict[str, Any]]:
-		url = f"{UPSTOX_BASE_URL}/v2/market/instruments"
-		r = self.session.get(url, timeout=30)
+		# Primary v2 endpoint
+		url = f"{UPSTOX_BASE_URL}/v2/instruments"
+		r = self.session.get(url, timeout=60)
+		if r.status_code == 404:
+			# Fallback legacy path (if any future change)
+			url_fallback = f"{UPSTOX_BASE_URL}/v2/market/instruments"
+			r = self.session.get(url_fallback, timeout=60)
 		r.raise_for_status()
-		data = r.json().get("data") or []
-		return data
+		data = r.json().get("data") or r.json()
+		# Ensure list
+		if isinstance(data, dict) and "instruments" in data:
+			data = data["instruments"]
+		return data if isinstance(data, list) else []
 
 	def get_historical_candles(self, instrument_key: str, interval: str, from_date: dt.datetime, to_date: dt.datetime) -> List[Dict[str, Any]]:
-		url = f"{UPSTOX_BASE_URL}/v2/historical-candle/{instrument_key}/{interval}"
-		params = {
-			"from_date": from_date.strftime("%Y-%m-%d %H:%M"),
-			"to_date": to_date.strftime("%Y-%m-%d %H:%M"),
-		}
-		r = self.session.get(url, params=params, timeout=30)
+		# v2 uses path segments: .../{interval}/{to_date}/{from_date}
+		to_s = to_date.strftime("%Y-%m-%d")
+		from_s = from_date.strftime("%Y-%m-%d")
+		url = f"{UPSTOX_BASE_URL}/v2/historical-candle/{instrument_key}/{interval}/{to_s}/{from_s}"
+		r = self.session.get(url, timeout=60)
 		r.raise_for_status()
-		return r.json().get("data", {}).get("candles", [])
+		payload = r.json().get("data", {})
+		candles = payload.get("candles") if isinstance(payload, dict) else []
+		return candles or []
 
 	def get_ltp(self, instrument_key: str) -> float:
 		url = f"{UPSTOX_BASE_URL}/v2/market-quote/ltp"
