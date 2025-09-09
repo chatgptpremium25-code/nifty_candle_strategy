@@ -124,8 +124,7 @@ def run_one_pm_breakout(budget_rupees: float = 600.0, stop_loss_rupees: float = 
 	nifty_key = resolver.find_nifty_index_key()
 	# Get 13:00 candle high/low
 	today = dt.datetime.now(tz=IST).date()
-	from bot.backtest import Backtester  # reuse fetch helpers via client directly
-	# Fetch NIFTY 5m candles for today via v3
+	# Fetch NIFTY 5m candles for this month via v3
 	month_start = today.replace(day=1)
 	candles = client.get_historical_candles_v3(nifty_key, "minutes", 5, month_start, today)
 	# Find 13:00 bar
@@ -159,8 +158,8 @@ def run_one_pm_breakout(budget_rupees: float = 600.0, stop_loss_rupees: float = 
 			# take CE within budget
 			opt_key = resolver.find_affordable_option_key(ltp, side="ce", budget_rupees=budget_rupees)
 			if opt_key:
-				qty = 1  # buy 1 unit; budget already used for affordability via lot cost check
-				resp = client.place_order(opt_key, side="buy", quantity=qty, product="MIS", variety="REGULAR", order_type="MARKET")
+				qty = 1
+				client.place_order(opt_key, side="buy", quantity=qty, product="MIS", variety="REGULAR", order_type="MARKET")
 				pos_key = opt_key
 				pos_qty = qty
 				entry_price = client.get_ltp(opt_key)
@@ -170,7 +169,7 @@ def run_one_pm_breakout(budget_rupees: float = 600.0, stop_loss_rupees: float = 
 			opt_key = resolver.find_affordable_option_key(ltp, side="pe", budget_rupees=budget_rupees)
 			if opt_key:
 				qty = 1
-				resp = client.place_order(opt_key, side="buy", quantity=qty, product="MIS", variety="REGULAR", order_type="MARKET")
+				client.place_order(opt_key, side="buy", quantity=qty, product="MIS", variety="REGULAR", order_type="MARKET")
 				pos_key = opt_key
 				pos_qty = qty
 				entry_price = client.get_ltp(opt_key)
@@ -192,6 +191,28 @@ def run_one_pm_breakout(budget_rupees: float = 600.0, stop_loss_rupees: float = 
 	print("Square-off time reached.")
 
 
+def schedule_onepm_once() -> None:
+	now = dt.datetime.now(tz=IST)
+	# compute next weekday 13:00 IST
+	candidate = dt.datetime.combine(now.date(), dt.time(13, 0), tzinfo=IST)
+	if now >= candidate:
+		candidate = candidate + dt.timedelta(days=1)
+	# skip weekends
+	while candidate.weekday() >= 5:
+		candidate = candidate + dt.timedelta(days=1)
+	print(f"Scheduled 1:00 PM breakout at {candidate}")
+	while True:
+		now = dt.datetime.now(tz=IST)
+		delta = (candidate - now).total_seconds()
+		if delta <= 0:
+			break
+		time.sleep(min(60, max(1, int(delta))))
+	try:
+		run_one_pm_breakout(budget_rupees=600.0, stop_loss_rupees=100.0)
+	except Exception as e:
+		print(f"Run failed: {e}")
+
+
 def main() -> None:
 	parser = argparse.ArgumentParser(description="NIFTY 14:40 breakout bot")
 	parser.add_argument("--auth", action="store_true", help="Run auth flow. If --auth-code omitted, prints login URL")
@@ -207,6 +228,7 @@ def main() -> None:
 	parser.add_argument("--atm-pe", action="store_true", help="Auto-resolve and buy NIFTY ATM PE")
 	parser.add_argument("--qty", type=int, default=None, help="Quantity to buy (defaults to lot size)")
 	parser.add_argument("--one-pm-breakout", action="store_true", help="Run 1:00 PM breakout with small budget and SL")
+	parser.add_argument("--schedule-onepm", action="store_true", help="Schedule next weekday 13:00 IST one-pm breakout run")
 	args = parser.parse_args()
 
 	if args.auth:
@@ -223,6 +245,10 @@ def main() -> None:
 
 	if args.one_pm_breakout:
 		run_one_pm_breakout(budget_rupees=600.0, stop_loss_rupees=100.0)
+		return
+
+	if args.schedule_onepm:
+		schedule_onepm_once()
 		return
 
 	run_daily(trade_today=not args.no_trade, enforce_sl=True)
