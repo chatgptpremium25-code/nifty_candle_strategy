@@ -35,7 +35,6 @@ class UpstoxClient:
 		return r.json().get("data") or []
 
 	def get_historical_candles_v3(self, instrument_key: str, unit: str, interval: int, from_date: dt.date, to_date: dt.date) -> List[List[Any]]:
-		# v3 endpoint expects /v3/historical-candle/{instrumentKey}/{unit}/{interval}/{to}/{from}
 		url = f"https://api.upstox.com/v3/historical-candle/{instrument_key}/{unit}/{interval}/{to_date.isoformat()}/{from_date.isoformat()}"
 		r = self.session.get(url, timeout=60)
 		r.raise_for_status()
@@ -72,9 +71,10 @@ class UpstoxClient:
 		r.raise_for_status()
 		data = r.json().get("data", {})
 		val = data.get(instrument_key, {})
-		return float(val.get("last_price"))
+		lp = val.get("last_price")
+		return float(lp) if lp is not None else float("nan")
 
-	def place_order(self, instrument_key: str, side: str, quantity: int, product: str, variety: str, order_type: str = "MARKET", price: Optional[float] = None) -> Dict[str, Any]:
+	def place_order(self, instrument_key: str, side: str, quantity: int, product: str, variety: str, order_type: str = "MARKET", price: Optional[float] = None, is_amo: bool = False) -> Dict[str, Any]:
 		url = f"{UPSTOX_BASE_URL}/v2/order/place"
 		payload = {
 			"instrument_key": instrument_key,
@@ -84,6 +84,7 @@ class UpstoxClient:
 			"transaction_type": "BUY" if side.lower() == "buy" else "SELL",
 			"validity": "DAY",
 			"variety": variety,
+			"is_amo": is_amo,
 		}
 		if order_type == "LIMIT" and price is not None:
 			payload["price"] = round(float(price), 2)

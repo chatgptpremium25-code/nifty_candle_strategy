@@ -213,6 +213,20 @@ def schedule_onepm_once() -> None:
 		print(f"Run failed: {e}")
 
 
+def place_amo_cheapest_pe(budget_rupees: float = 600.0) -> None:
+	auth = UpstoxAuth()
+	client = UpstoxClient(auth)
+	resolver = InstrumentResolver(client)
+	nifty_key = resolver.find_nifty_index_key()
+	ltp = client.get_ltp(nifty_key)
+	opt_key = resolver.find_affordable_option_key(ltp, side="pe", budget_rupees=budget_rupees)
+	if not opt_key:
+		raise RuntimeError("No PE found within budget")
+	lot = resolver.get_lot_size(opt_key)
+	resp = client.place_order(opt_key, side="buy", quantity=lot, product="MIS", variety="REGULAR", order_type="MARKET", is_amo=True)
+	print("AMO placed:", resp)
+
+
 def main() -> None:
 	parser = argparse.ArgumentParser(description="NIFTY 14:40 breakout bot")
 	parser.add_argument("--auth", action="store_true", help="Run auth flow. If --auth-code omitted, prints login URL")
@@ -229,6 +243,7 @@ def main() -> None:
 	parser.add_argument("--qty", type=int, default=None, help="Quantity to buy (defaults to lot size)")
 	parser.add_argument("--one-pm-breakout", action="store_true", help="Run 1:00 PM breakout with small budget and SL")
 	parser.add_argument("--schedule-onepm", action="store_true", help="Schedule next weekday 13:00 IST one-pm breakout run")
+	parser.add_argument("--amo-cheapest-pe", action="store_true", help="Place AMO for cheapest near-ATM PE within budget")
 	args = parser.parse_args()
 
 	if args.auth:
@@ -249,6 +264,10 @@ def main() -> None:
 
 	if args.schedule_onepm:
 		schedule_onepm_once()
+		return
+
+	if args.amo_cheapest_pe:
+		place_amo_cheapest_pe(budget_rupees=600.0)
 		return
 
 	run_daily(trade_today=not args.no_trade, enforce_sl=True)
